@@ -11,6 +11,8 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <DebugType>none</DebugType>
+    <ApplicationIcon>Icons/audio.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+  <ItemGroup><EmbeddedResource Include="Icons/*.ico" /></ItemGroup>
 </Project>
