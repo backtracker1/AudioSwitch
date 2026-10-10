@@ -49,7 +49,9 @@ internal static class ComActivation
                 Diagnostics.Write($"{operation}: HRESULT=0x{hr:X8}");
                 Marshal.ThrowExceptionForHR(hr);
                 return Diagnostics.Operation($"Marshal.GetTypedObjectForIUnknown<{typeof(T).Name}> IID={iid:B}",
-                    () => (T)Marshal.GetTypedObjectForIUnknown(pointer, typeof(T)));
+                    () => OperatingSystem.IsWindows()
+                        ? (T)Marshal.GetTypedObjectForIUnknown(pointer, typeof(T))
+                        : throw new PlatformNotSupportedException("Windows COM is required."));
             }
             finally { if (pointer != IntPtr.Zero) Marshal.Release(pointer); }
         });

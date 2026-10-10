@@ -3,12 +3,15 @@ using System.Runtime.InteropServices;
 namespace AudioSwitch;
 
 internal enum Role { Console, Multimedia, Communications }
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 internal struct PropertyKey { public Guid Format; public uint Id; }
 [StructLayout(LayoutKind.Explicit, Size = 24)]
 internal struct PropVariant
 {
     [FieldOffset(0)] public ushort Type;
+    [FieldOffset(2)] public ushort Reserved1;
+    [FieldOffset(4)] public ushort Reserved2;
+    [FieldOffset(6)] public ushort Reserved3;
     [FieldOffset(8)] public IntPtr Pointer;
 }
 
@@ -82,7 +85,7 @@ internal sealed class CoreAudio : IDisposable
         var policy = ComActivation.Create<IPolicyConfig>(PolicyClass);
         Release(policy);
     }
-    private static readonly PropertyKey FriendlyName = new() { Format = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), Id = 14 };
+    internal static readonly PropertyKey FriendlyName = new() { Format = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), Id = 14 };
     [DllImport("ole32.dll")] private static extern int PropVariantClear(ref PropVariant value);
     private static int Call(string operation, Func<int> action) => Diagnostics.Operation(operation, () =>
     {
@@ -125,28 +128,23 @@ internal sealed class CoreAudio : IDisposable
             for (uint i = 0; i < count; i++)
             {
                 IDevice device = null!;
-                Call($"IMMDeviceCollection.Item({i})", () => collection.Item(i, out device));
+                string id = $"unreadable-index-{i}";
+                uint state = 0;
                 try
                 {
-                    string id = "";
-                    uint state = 0;
-                    IPropertyStore store = null!;
+                    Call($"IMMDeviceCollection.Item({i})", () => collection.Item(i, out device));
                     Call("IMMDevice.GetId", () => device.GetId(out id));
                     Call("IMMDevice.GetState", () => device.GetState(out state));
-                    Call("IMMDevice.OpenPropertyStore(read)", () => device.OpenPropertyStore(0, out store));
-                    try
-                    {
-                        var key = FriendlyName;
-                        PropVariant value = default;
-                        Call("IPropertyStore.GetValue(PKEY_Device_FriendlyName)", () => store.GetValue(ref key, out value));
-                        try
-                        {
-                            var name = value.Type == 31 ? Marshal.PtrToStringUni(value.Pointer) : null;
-                            result.Add(new Endpoint(id, name ?? "", state));
-                        }
-                        finally { Call("PropVariantClear", () => PropVariantClear(ref value)); }
-                    }
-                    finally { Release(store); }
+                    var name = ReadFriendlyName(device, id, state);
+                    result.Add(new Endpoint(id, name, state));
+                }
+                catch (Exception error)
+                {
+                    // All-state enumeration includes removed device instances. Keep
+                    // explicit diagnostics/status instead of aborting valid endpoints.
+                    // Unreadable active/unknown-state entries block safe selection.
+                    Diagnostics.Write($"ENDPOINT ERROR id={id}; state=0x{state:X}; HRESULT=0x{error.HResult:X8}; reason={EndpointReadErrors.Describe(error.HResult)}; {error}");
+                    result.Add(new Endpoint(id, "", state, $"0x{error.HResult:X8}: {error.Message}"));
                 }
                 finally { Release(device); }
             }
@@ -155,8 +153,73 @@ internal sealed class CoreAudio : IDisposable
         finally { Release(collection); }
     }
 
+    private static string ReadFriendlyName(IDevice device, string id, uint state)
+    {
+        IPropertyStore store = null!;
+        try
+        {
+            Call($"IMMDevice.OpenPropertyStore id={id}; state=0x{state:X}", () => device.OpenPropertyStore(0, out store));
+            return ReadName(store, $"endpoint id={id}; state=0x{state:X}");
+        }
+        finally { Release(store); }
+    }
+
+    private static string ReadName(IPropertyStore store, string context)
+    {
+        var key = FriendlyName;
+        PropVariant value = default;
+        try
+        {
+            Call($"IPropertyStore.GetValue(PKEY_Device_FriendlyName {key.Format:B}/{key.Id}) {context}",
+                () => store.GetValue(ref key, out value));
+            Diagnostics.Write($"Friendly-name PROPVARIANT vt={value.Type}; {context}");
+            if (value.Type != 31 || value.Pointer == IntPtr.Zero)
+                throw new InvalidOperationException($"Friendly name is not VT_LPWSTR (vt={value.Type}); {context}");
+            var name = Marshal.PtrToStringUni(value.Pointer);
+            if (string.IsNullOrWhiteSpace(name)) throw new InvalidOperationException($"Empty friendly name; {context}");
+            return name;
+        }
+        finally
+        {
+            // GetValue can initialize a variant even on failure. Always clear it.
+            var hr = PropVariantClear(ref value);
+            if (hr < 0) Diagnostics.Write($"PropVariantClear: HRESULT=0x{hr:X8}; {context}");
+        }
+    }
+
+    [DllImport("propsys.dll", ExactSpelling = true)]
+    private static extern int PSCreateMemoryPropertyStore(in Guid iid, out IPropertyStore store);
+    internal static void VerifyPropertyMarshalling()
+    {
+        IPropertyStore store = null!;
+        var iid = typeof(IPropertyStore).GUID;
+        using var apartment = new ComApartment();
+        try
+        {
+            Call("PSCreateMemoryPropertyStore", () => PSCreateMemoryPropertyStore(in iid, out store));
+            var key = FriendlyName;
+            const string expected = "Speakers (ASUS Xonar D2 Audio Device) — native Unicode test";
+            var value = new PropVariant { Type = 31, Pointer = Marshal.StringToCoTaskMemUni(expected) };
+            try { Call("IPropertyStore.SetValue(native property marshalling test)", () => store.SetValue(ref key, ref value)); }
+            finally { PropVariantClear(ref value); }
+            if (ReadName(store, "native property marshalling test") != expected)
+                throw new InvalidOperationException("PROPERTYKEY/PROPVARIANT native round trip failed.");
+        }
+        finally { Release(store); }
+    }
+
     internal void Switch(string id)
     {
+        // Re-open the selected ID just before switching; refuse stale/inactive IDs.
+        IDevice target = null!;
+        try
+        {
+            Call("IMMDeviceEnumerator.GetDevice(selected ID)", () => enumerator.GetDevice(id, out target));
+            uint state = 0;
+            Call("IMMDevice.GetState(selected ID)", () => target.GetState(out state));
+            if (state != 1) throw new InvalidOperationException("The selected device is no longer active. Reopen the menu and reconnect it.");
+        }
+        finally { Release(target); }
         var previous = new[] { DefaultId(Role.Console), DefaultId(Role.Multimedia) };
         var policy = ComActivation.Create<IPolicyConfig>(PolicyClass);
         try
