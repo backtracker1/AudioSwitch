@@ -21,7 +21,7 @@ internal interface IDeviceEnumerator
     [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr callback);
     [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr callback);
 }
-[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-C0A3D7E6B5D7"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IDeviceCollection
 {
     [PreserveSig] int GetCount(out uint count);
@@ -48,37 +48,66 @@ internal interface IPropertyStore
 [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IPolicyConfig
 {
-    [PreserveSig] int GetMixFormat(IntPtr id, IntPtr format);
-    [PreserveSig] int GetDeviceFormat(IntPtr id, int defaultFormat, IntPtr format);
-    [PreserveSig] int ResetDeviceFormat(IntPtr id);
-    [PreserveSig] int SetDeviceFormat(IntPtr id, IntPtr endpoint, IntPtr mix);
-    [PreserveSig] int GetProcessingPeriod(IntPtr id, int defaultPeriod, IntPtr period, IntPtr minimum);
-    [PreserveSig] int SetProcessingPeriod(IntPtr id, IntPtr period);
-    [PreserveSig] int GetShareMode(IntPtr id, IntPtr mode);
-    [PreserveSig] int SetShareMode(IntPtr id, IntPtr mode);
-    [PreserveSig] int GetPropertyValue(IntPtr id, ref PropertyKey key, out PropVariant value);
-    [PreserveSig] int SetPropertyValue(IntPtr id, ref PropertyKey key, ref PropVariant value);
+    // Slots 3–12 are deliberately uncallable placeholders: these undocumented
+    // methods have variant signatures across Windows versions. Only slot 13
+    // (SetDefaultEndpoint) is invoked. IUnknown occupies slots 0–2.
+    void Reserved1();
+    void Reserved2();
+    void Reserved3();
+    void Reserved4();
+    void Reserved5();
+    void Reserved6();
+    void Reserved7();
+    void Reserved8();
+    void Reserved9();
+    void Reserved10();
     [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string id, Role role);
-    [PreserveSig] int SetEndpointVisibility(IntPtr id, int visible);
+    void ReservedVisibility();
 }
 
 internal sealed class CoreAudio : IDisposable
 {
-    private readonly IDeviceEnumerator enumerator = (IDeviceEnumerator)Activator.CreateInstance(
-        Type.GetTypeFromCLSID(new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"), true)!)!;
+    internal static readonly Guid EnumeratorClass = new("BCDE0395-E52F-467C-8E3D-C4579291692E");
+    internal static readonly Guid PolicyClass = new("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9");
+    private readonly IDeviceEnumerator enumerator;
+    private readonly ComApartment apartment;
+    internal CoreAudio()
+    {
+        apartment = new ComApartment();
+        try { enumerator = ComActivation.Create<IDeviceEnumerator>(EnumeratorClass); }
+        catch { apartment.Dispose(); throw; }
+    }
+    internal static void VerifyPolicyActivation()
+    {
+        var policy = ComActivation.Create<IPolicyConfig>(PolicyClass);
+        Release(policy);
+    }
     private static readonly PropertyKey FriendlyName = new() { Format = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), Id = 14 };
     [DllImport("ole32.dll")] private static extern int PropVariantClear(ref PropVariant value);
-    private static void Check(int hr) => Marshal.ThrowExceptionForHR(hr);
-    private static void Release(object? value) { if (value is not null && Marshal.IsComObject(value)) Marshal.ReleaseComObject(value); }
+    private static int Call(string operation, Func<int> action) => Diagnostics.Operation(operation, () =>
+    {
+        var hr = action();
+        Diagnostics.Write($"{operation}: HRESULT=0x{hr:X8}");
+        Marshal.ThrowExceptionForHR(hr);
+        return hr;
+    });
+    private static void Release(object? value) { if (OperatingSystem.IsWindows() && value is not null && Marshal.IsComObject(value)) Marshal.ReleaseComObject(value); }
 
     internal string? DefaultId(Role role)
     {
-        var hr = enumerator.GetDefaultAudioEndpoint(0, role, out var device);
+        IDevice device = null!;
+        var hr = Diagnostics.Operation($"IMMDeviceEnumerator.GetDefaultAudioEndpoint({role})", () =>
+        {
+            var result = enumerator.GetDefaultAudioEndpoint(0, role, out device);
+            Diagnostics.Write($"GetDefaultAudioEndpoint({role}): HRESULT=0x{result:X8}");
+            if (result != unchecked((int)0x80070490)) Marshal.ThrowExceptionForHR(result);
+            return result;
+        });
         try
         {
             if (hr == unchecked((int)0x80070490)) return null;
-            Check(hr);
-            Check(device.GetId(out var id));
+            string id = "";
+            Call("IMMDevice.GetId", () => device.GetId(out id));
             return id;
         }
         finally { Release(device); }
@@ -86,29 +115,36 @@ internal sealed class CoreAudio : IDisposable
 
     internal IReadOnlyList<Endpoint> Devices()
     {
-        Check(enumerator.EnumAudioEndpoints(0, 15, out var collection));
+        IDeviceCollection collection = null!;
+        Call("IMMDeviceEnumerator.EnumAudioEndpoints(render, all states)", () => enumerator.EnumAudioEndpoints(0, 15, out collection));
         try
         {
-            Check(collection.GetCount(out var count));
+            uint count = 0;
+            Call("IMMDeviceCollection.GetCount", () => collection.GetCount(out count));
             var result = new List<Endpoint>();
             for (uint i = 0; i < count; i++)
             {
-                Check(collection.Item(i, out var device));
+                IDevice device = null!;
+                Call($"IMMDeviceCollection.Item({i})", () => collection.Item(i, out device));
                 try
                 {
-                    Check(device.GetId(out var id));
-                    Check(device.GetState(out var state));
-                    Check(device.OpenPropertyStore(0, out var store));
+                    string id = "";
+                    uint state = 0;
+                    IPropertyStore store = null!;
+                    Call("IMMDevice.GetId", () => device.GetId(out id));
+                    Call("IMMDevice.GetState", () => device.GetState(out state));
+                    Call("IMMDevice.OpenPropertyStore(read)", () => device.OpenPropertyStore(0, out store));
                     try
                     {
                         var key = FriendlyName;
-                        Check(store.GetValue(ref key, out var value));
+                        PropVariant value = default;
+                        Call("IPropertyStore.GetValue(PKEY_Device_FriendlyName)", () => store.GetValue(ref key, out value));
                         try
                         {
                             var name = value.Type == 31 ? Marshal.PtrToStringUni(value.Pointer) : null;
                             result.Add(new Endpoint(id, name ?? "", state));
                         }
-                        finally { Check(PropVariantClear(ref value)); }
+                        finally { Call("PropVariantClear", () => PropVariantClear(ref value)); }
                     }
                     finally { Release(store); }
                 }
@@ -122,17 +158,21 @@ internal sealed class CoreAudio : IDisposable
     internal void Switch(string id)
     {
         var previous = new[] { DefaultId(Role.Console), DefaultId(Role.Multimedia) };
-        var policy = (IPolicyConfig)Activator.CreateInstance(
-            Type.GetTypeFromCLSID(new Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9"), true)!)!;
+        var policy = ComActivation.Create<IPolicyConfig>(PolicyClass);
         try
         {
-            Check(policy.SetDefaultEndpoint(id, Role.Console));
-            Check(policy.SetDefaultEndpoint(id, Role.Multimedia));
+            Call("IPolicyConfig.SetDefaultEndpoint(Console)", () => policy.SetDefaultEndpoint(id, Role.Console));
+            Call("IPolicyConfig.SetDefaultEndpoint(Multimedia)", () => policy.SetDefaultEndpoint(id, Role.Multimedia));
             for (var i = 0; i < 20; i++)
             {
-                if (DefaultId(Role.Console) == id && DefaultId(Role.Multimedia) == id) return;
+                if (DefaultId(Role.Console) == id && DefaultId(Role.Multimedia) == id)
+                {
+                    Diagnostics.Write("Verified Console and Multimedia defaults: " + id);
+                    return;
+                }
                 Thread.Sleep(50);
             }
+            Diagnostics.Write("Default endpoint verification timed out");
             throw new InvalidOperationException("Windows did not confirm the selected playback device.");
         }
         catch (Exception error)
@@ -141,11 +181,18 @@ internal sealed class CoreAudio : IDisposable
             var restored = true;
             for (var i = 0; i < previous.Length; i++)
                 if (previous[i] is { } oldId)
-                    restored &= policy.SetDefaultEndpoint(oldId, (Role)i) >= 0;
+                {
+                    try { Call($"IPolicyConfig.SetDefaultEndpoint(rollback {(Role)i})", () => policy.SetDefaultEndpoint(oldId, (Role)i)); }
+                    catch (Exception rollbackError) { Diagnostics.Write(rollbackError.ToString()); restored = false; }
+                }
             throw new InvalidOperationException("Audio switching failed. " +
                 (restored ? "Previous defaults were restored where available. " : "Check your default playback devices. ") + error.Message, error);
         }
         finally { Release(policy); }
     }
-    public void Dispose() => Release(enumerator);
+    public void Dispose()
+    {
+        try { Release(enumerator); }
+        finally { apartment.Dispose(); }
+    }
 }

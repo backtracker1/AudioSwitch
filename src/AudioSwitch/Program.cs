@@ -13,15 +13,18 @@ internal static class Program
         if (!acquired) return 0;
         try
         {
+            Diagnostics.Write($"AudioSwitch started; OS={Environment.OSVersion}; x64={Environment.Is64BitProcess}");
             using var audio = new CoreAudio();
             var target = DeviceSelection.Select(audio.Devices(), audio.DefaultId(Role.Console));
+            Diagnostics.Write($"Selected endpoint: {target.Name}; ID={target.Id}; state={target.State}");
             audio.Switch(target.Id);
             ShowNotification("AudioSwitch", "Active output: " + target.Name, false);
             return 0;
         }
         catch (Exception error)
         {
-            ShowNotification("AudioSwitch — unable to switch", error.Message, true);
+            Diagnostics.Write(error.ToString());
+            ShowNotification("AudioSwitch — unable to switch", error.Message + "\nLog: " + Diagnostics.LogPath, true);
             return 1;
         }
         finally { mutex.ReleaseMutex(); }
@@ -50,11 +53,11 @@ internal sealed class NotificationForm : Form
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(380, error ? 165 : 115);
+        ClientSize = new Size(380, error ? 250 : 115);
         BackColor = Color.FromArgb(32, 32, 32);
         ForeColor = Color.White;
         var heading = new Label { Text = title, Location = new Point(18, 14), Size = new Size(344, 25), Font = new Font("Segoe UI", 11, FontStyle.Bold) };
-        var text = new Label { Text = message, Location = new Point(18, 45), Size = new Size(344, error ? 102 : 57), Font = new Font("Segoe UI", 10) };
+        var text = new Label { Text = message, Location = new Point(18, 45), Size = new Size(344, error ? 187 : 57), Font = new Font("Segoe UI", 10) };
         Controls.AddRange(new Control[] { heading, text });
         Shown += (_, _) =>
         {

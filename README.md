@@ -28,3 +28,21 @@ The portable output is `artifacts/win-x64/AudioSwitch.exe`. Native runtime compo
 The dependency-free executable test runner validates matching, exclusions, endpoint identity, toggling, unavailable devices, and ambiguous endpoints. It returns a failing exit code if any case fails.
 
 Hardware testing has not been performed. On Windows 11 with both devices connected, verify successive launches select JBL and ASUS; confirm both Console and Multimedia roles, unchanged Communications, automatic notification dismissal, missing/disabled devices, and no remaining AudioSwitch process after dismissal. Windows Core Audio enumeration is documented, but the policy configuration COM interface used to set defaults is undocumented and may change in future Windows versions. The EXE is unsigned; Windows may show SmartScreen warnings for a downloaded build.
+
+## COM diagnostics and regression fix
+
+The initial implementation declared the wrong `IMMDeviceCollection` IID. The Windows SDK specifies `0BD7A1BE-7A1A-44DB-8397-CC5392387B5E`; the incorrect IID caused interface marshalling during `EnumAudioEndpoints` to fail before device selection or PolicyConfig switching.
+
+Enumerator activation requests CLSID `BCDE0395-E52F-467C-8E3D-C4579291692E` with IID `A95664D2-9614-4F35-A746-DE8DB63617E6`. Policy activation requests CLSID `870AF99C-171D-4F9E-AF0D-E63DF40C2BC9` with IID `F8679F50-850A-41CF-9C72-430F290290C8` (the Win7/Win8 and Windows 10 RS1 onward variant also used by EarTrumpet). `SetDefaultEndpoint` occupies zero-based vtable slot 13 including IUnknown, returns HRESULT, and takes an LPCWSTR endpoint ID and a 32-bit ERole. The ten preceding undocumented slots are reserved and never called; their unrelated version-dependent signatures are intentionally not exposed.
+
+Sources checked: [Microsoft Windows SDK mmdeviceapi.h](https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/mmdeviceapi.h), [EarTrumpet policy interface](https://github.com/File-New-Project/EarTrumpet/blob/master/EarTrumpet/Interop/MMDeviceAPI/IPolicyConfig.cs), and [policy coclass](https://github.com/File-New-Project/EarTrumpet/blob/master/EarTrumpet/Interop/MMDeviceAPI/PolicyConfigClient.cs). This verifies declarations against references; it does not establish hardware compatibility.
+
+Diagnostics are written to `%LOCALAPPDATA%\AudioSwitch\AudioSwitch.log`, with one previous file retained when the log exceeds 1 MiB. Logs identify activation CLSID/IID, native HRESULTs, exact COM operations, exceptions, selected endpoints, rollback attempts, and successful default verification. Error notifications include the log location. Logging failures do not replace the original error. Logs contain local endpoint names and IDs; inspect them before sharing.
+
+The test runner includes COM identity/vtable regressions and verifies operation/HRESULT logging. On Windows, additionally run:
+
+```sh
+dotnet run --project tests/AudioSwitch.Tests -c Release -- --com-smoke
+```
+
+This activates both COM interfaces and enumerates devices without changing any defaults. GitHub Actions runs this on its Windows runner and uploads diagnostic logs if a step fails. A CI activation smoke test does not test actual switching with JBL/ASUS hardware.

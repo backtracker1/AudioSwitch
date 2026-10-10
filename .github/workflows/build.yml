@@ -16,6 +16,15 @@ jobs:
           global-json-file: global.json
       - name: Test device selection and toggle logic
         run: dotnet run --project tests/AudioSwitch.Tests -c Release
+      - name: Smoke test COM activation and enumeration (no switching)
+        run: dotnet run --project tests/AudioSwitch.Tests -c Release -- --com-smoke
+      - name: Upload COM diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioSwitch-COM-diagnostics
+          path: ~/AppData/Local/AudioSwitch/AudioSwitch.log*
+          if-no-files-found: ignore
       - name: Publish portable Windows x64 executable
         run: dotnet publish src/AudioSwitch/AudioSwitch.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/win-x64
       - name: Verify executable exists
